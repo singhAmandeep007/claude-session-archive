@@ -1,0 +1,14 @@
+{
+  "name": "claude-session-archive",
+  "description": "Private marketplace for the session-archive Claude Code plugin.",
+  "owner": {
+    "name": "Amandeep Singh"
+  },
+  "plugins": [
+    {
+      "name": "session-archive",
+      "source": "./",
+      "description": "Permanent, readable archive of every Claude Code session, with file versions and artifacts."
+    }
+  ]
+}

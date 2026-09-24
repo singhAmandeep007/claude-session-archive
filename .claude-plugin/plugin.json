@@ -1,0 +1,21 @@
+{
+  "name": "session-archive",
+  "displayName": "Session Archive",
+  "version": "1.0.0",
+  "description": "Keeps a permanent, readable copy of every Claude Code session: the exact transcript, a Markdown chat, every file version Claude wrote, pasted images, and published artifact links. Runs from hooks, so it costs zero model tokens.",
+  "author": {
+    "name": "Amandeep Singh",
+    "url": "https://github.com/singhAmandeep007"
+  },
+  "repository": "https://github.com/singhAmandeep007/claude-session-archive",
+  "license": "MIT",
+  "keywords": ["archive", "history", "transcript", "backup", "hooks"],
+  "userConfig": {
+    "archive_dir": {
+      "type": "directory",
+      "title": "Archive folder",
+      "description": "Where session folders and the README index are written.",
+      "default": "~/claude-archive"
+    }
+  }
+}
