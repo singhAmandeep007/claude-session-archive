@@ -1,7 +1,7 @@
 {
   "name": "session-archive",
   "displayName": "Session Archive",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Keeps a permanent, readable copy of every Claude Code session: the exact transcript, a Markdown chat, every file version Claude wrote, pasted images, and published artifact links. Runs from hooks, so it costs zero model tokens.",
   "author": {
     "name": "Amandeep Singh",
@@ -19,8 +19,8 @@
   "userConfig": {
     "archive_dir": {
       "type": "directory",
-      "title": "Archive folder",
-      "description": "Where session folders and the README index are written.",
+      "title": "Archive folder (where your chats are saved)",
+      "description": "Folder where every chat is saved. Keep the default ~/claude-archive unless you want it elsewhere, for example ~/Documents/claude-archive. Each chat gets its own subfolder: <folder>/<project>/<date>_<id>/ containing chat.md (readable chat), raw/ (exact copy), and artifacts/ (every file version). Avoid synced or shared folders: chats can contain secrets.",
       "default": "~/claude-archive"
     }
   }

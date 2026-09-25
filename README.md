@@ -36,16 +36,46 @@ Files larger than 25 MB are recorded in `versions.jsonl` but not copied.
 
 Problems never block a turn: hook errors are appended to `<archive>/_logs/errors.log`.
 
-## Install (private repo)
+## Install
 
-Claude Code uses your git credentials, so run `gh auth login` (and `gh auth setup-git` for background updates) first.
+The repo is private, so Claude Code needs your GitHub login first (one time):
+
+```bash
+gh auth login
+gh auth setup-git
+```
+
+**Step 1. Add the marketplace** (one time per machine):
 
 ```bash
 claude plugin marketplace add singhAmandeep007/claude-session-archive
-claude plugin install session-archive@claude-session-archive
 ```
 
-Then archive everything Claude Code still has on disk (once, from a terminal):
+**Step 2. Install, choosing where chats are saved:**
+
+```bash
+claude plugin install session-archive@claude-session-archive --config archive_dir=~/claude-archive
+```
+
+`archive_dir` is the only setting.
+Replace `~/claude-archive` with any folder you like, for example:
+
+```bash
+claude plugin install session-archive@claude-session-archive --config archive_dir=~/Documents/claude-archive
+```
+
+If you install without `--config`, Claude Code prints a note that 1 userConfig option is not yet set.
+That is harmless: the plugin then uses `~/claude-archive`.
+To choose or change the folder later, do either of these:
+
+- inside Claude Code, run `/plugin configure session-archive@claude-session-archive` and fill in "Archive folder"
+- in a terminal, re-run the Step 2 command with a different `--config archive_dir=...` (it updates the setting even when the plugin is already installed)
+
+**Step 3. Start a new session.**
+Hooks load when a session starts, so sessions that were already open are not archived.
+After your first reply, check that `<archive folder>/README.md` lists the session.
+
+**Step 4 (optional). Archive the chats Claude Code still has on disk:**
 
 ```bash
 python3 ~/.claude/plugins/cache/claude-session-archive/session-archive/*/scripts/archive.py backfill

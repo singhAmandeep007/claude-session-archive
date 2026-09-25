@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.1 (2026-09-25)
+
+- Clearer "Archive folder" setting: plain description with an example, and a step-by-step install section showing `--config archive_dir=...` and `/plugin configure`.
+
 ## 1.1.0 (2026-09-25)
 
 - Added `/session-archive:import [id] [--list] [--from <folder>]`: restores archived sessions byte-exact into Claude Code so `claude --resume` works, including subagents and file history. Never overwrites a live transcript that differs.
