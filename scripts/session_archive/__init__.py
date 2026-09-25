@@ -10,9 +10,10 @@ Modules:
     render     the readable chat.md
     index      per-session meta.json and the archive-wide README.md
     sync       orchestration used by hooks and the CLI
+    restore    put archived sessions back into Claude Code (the import command)
 
 Only the Python standard library is used, and Python 3.9+ is supported
 (macOS ships 3.9 as /usr/bin/python3).
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

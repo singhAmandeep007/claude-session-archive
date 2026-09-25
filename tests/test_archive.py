@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -326,6 +327,108 @@ class HookAndIndexTests(ArchiveTestCase):
         self.env.transcript(SID_A, repo).user("a").assistant("a").flush()
         self.save(SID_A, repo)
         self.assertEqual(self.env.archive.stat().st_mode & 0o777, 0o700)
+
+
+# -----------------------------------------------------------------------------
+# Import: putting archived sessions back into Claude Code
+# -----------------------------------------------------------------------------
+
+class ImportTests(ArchiveTestCase):
+    def archived_then_deleted(self, sid=SID_A, name="app"):
+        """Archive a session with subagents and file history, then delete Claude's copies."""
+        repo = git_init(self.env.work / name)
+        t = self.env.transcript(sid, repo)
+        t.user(f"work in {name}").assistant("done").flush()
+        (t.path.parent / sid / "subagents").mkdir(parents=True)
+        (t.path.parent / sid / "subagents" / "agent-1.jsonl").write_text("{}\n")
+        (self.env.claude / "file-history" / sid).mkdir(parents=True)
+        (self.env.claude / "file-history" / sid / "f@v1").write_text("before")
+        self.save(sid, repo)
+        original = t.path.read_bytes()
+        t.path.unlink()
+        shutil.rmtree(t.path.parent / sid)
+        shutil.rmtree(self.env.claude / "file-history" / sid)
+        return t, original
+
+    def test_deleted_session_is_restored_exactly_where_claude_expects_it(self):
+        t, original = self.archived_then_deleted()
+        out = self.env.cli("import")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(t.path.read_bytes(), original)
+        self.assertEqual((t.path.parent / SID_A / "subagents" / "agent-1.jsonl").read_text(), "{}\n")
+        self.assertEqual((self.env.claude / "file-history" / SID_A / "f@v1").read_text(), "before")
+        self.assertIn("1 restored", out.stdout)
+        self.assertIn(f"claude --resume {SID_A}", out.stdout)
+
+    def test_second_import_changes_nothing(self):
+        self.archived_then_deleted()
+        self.env.cli("import")
+        out = self.env.cli("import")
+        self.assertIn("0 restored, 0 extended, 1 already in Claude Code", out.stdout)
+
+    def test_a_different_live_transcript_is_never_overwritten(self):
+        t, _ = self.archived_then_deleted()
+        t.path.write_text('{"type": "user", "note": "live copy that diverged"}\n')
+        out = self.env.cli("import")
+        self.assertIn("1 conflicts", out.stdout)
+        self.assertIn("live copy that diverged", t.path.read_text())
+
+    def test_live_copy_that_is_an_older_prefix_is_extended(self):
+        t, original = self.archived_then_deleted()
+        t.path.write_bytes(original[: original.index(b"\n") + 1])  # just the first record
+        out = self.env.cli("import")
+        self.assertIn("1 extended", out.stdout)
+        self.assertEqual(t.path.read_bytes(), original)
+
+    def test_import_by_id_prefix_restores_only_that_session(self):
+        a, _ = self.archived_then_deleted(SID_A, "app")
+        b, _ = self.archived_then_deleted(SID_B, "web")
+        self.env.cli("import", SID_B[:8])
+        self.assertFalse(a.path.exists())
+        self.assertTrue(b.path.exists())
+
+    def test_list_only_reports_missing_sessions(self):
+        t, _ = self.archived_then_deleted()
+        out = self.env.cli("import", "--list")
+        self.assertIn("1 of 1 archived sessions are missing", out.stdout)
+        self.assertFalse(t.path.exists())
+
+    def test_sessions_from_a_backup_folder_are_archived_and_restored(self):
+        backup = self.env.tmp / "backup" / ".claude"
+        sid = "cccccccc-1111-2222-3333-444444444444"
+        transcript = backup / "projects" / "-Users-me-old-app" / f"{sid}.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(json.dumps({"type": "user", "timestamp": "2026-05-01T10:00:00Z",
+                                          "cwd": "/Users/me/old-app", "gitBranch": "main",
+                                          "message": {"role": "user", "content": "old question"}}) + "\n")
+        (backup / "file-history" / sid).mkdir(parents=True)
+        (backup / "file-history" / sid / "x@v1").write_text("old file")
+
+        out = self.env.cli("import", "--from", str(backup))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        live = self.env.claude / "projects" / "-Users-me-old-app" / f"{sid}.jsonl"
+        self.assertEqual(live.read_bytes(), transcript.read_bytes())
+        self.assertEqual((self.env.claude / "file-history" / sid / "x@v1").read_text(), "old file")
+        self.assertEqual(self.env.session_folders()[0].parent.name, "old-app")
+
+    def test_import_command_is_answered_by_the_hook_without_the_model(self):
+        self.archived_then_deleted()
+        result = self.env.hook({"hook_event_name": "UserPromptExpansion", "session_id": SID_B,
+                                "command_name": "session-archive:import", "command_args": "--list"})
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["decision"], "block")
+        self.assertIn("archived sessions are missing", decision["reason"])
+
+    def test_other_commands_pass_through_the_hook_untouched(self):
+        result = self.env.hook({"hook_event_name": "UserPromptExpansion", "session_id": SID_B,
+                                "command_name": "commit-commands:commit", "command_args": ""})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_bad_arguments_get_usage_instead_of_a_crash(self):
+        result = self.env.hook({"hook_event_name": "UserPromptExpansion", "session_id": SID_B,
+                                "command_name": "session-archive:import", "command_args": "--bogus"})
+        self.assertIn("usage: /session-archive:import", json.loads(result.stdout)["reason"])
 
 
 if __name__ == "__main__":

@@ -7,7 +7,14 @@ Commands:
     archive.py save --session ID [--cwd D] archive one session now (folder defaults to the
                                            latest one recorded in the transcript)
     archive.py backfill                    archive every transcript still on disk
+    archive.py import [ID] [--list] [--from DIR]
+                                           put archived sessions back into Claude Code
+                                           (--from first archives a backup folder)
     archive.py index                       rebuild <archive>/README.md
+
+The /session-archive:import command costs zero tokens: a UserPromptExpansion
+hook runs `import` itself and blocks the command before it reaches the model,
+showing this script's report as the block reason.
 
 Common option: --archive-dir DIR (default: see session_archive.config.archive_root).
 
@@ -23,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 import traceback
 from datetime import datetime
@@ -30,12 +38,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from session_archive import sync  # noqa: E402
-from session_archive.config import archive_root, remember_plugin_option  # noqa: E402
+from session_archive import restore, sync  # noqa: E402
+from session_archive.config import archive_root, claude_home, remember_plugin_option  # noqa: E402
 from session_archive.fsutil import file_lock  # noqa: E402
 from session_archive.index import rebuild_index  # noqa: E402
 
 FULL_SYNC_EVENTS = {"Stop", "SubagentStop", "PreCompact", "SessionEnd"}
+IMPORT_COMMAND = "session-archive:import"
 
 
 # -----------------------------------------------------------------------------
@@ -74,14 +83,24 @@ def cmd_hook(root: Path) -> int:
         remember_plugin_option()
         payload = json.load(sys.stdin)
         event = payload.get("hook_event_name", "unknown")
+        if event == "UserPromptExpansion" and payload.get("command_name") == IMPORT_COMMAND:
+            return block_with(run_import(root, payload.get("command_args") or ""))
         if event == "PostToolUse":
             sync.capture_tool(root, payload)
         elif event in FULL_SYNC_EVENTS:
             transcript = Path(payload.get("transcript_path") or "")
             if transcript.is_file() and payload.get("session_id"):
                 sync.sync_session(root, payload["session_id"], transcript, payload.get("cwd"))
-    except Exception:  # never block a turn; keep the evidence instead
+    except Exception as exc:  # never block a turn; keep the evidence instead
         log_error(root, f"hook {event}")
+        if event == "UserPromptExpansion":
+            return block_with(f"import failed: {exc} (details in {root / '_logs' / 'errors.log'})")
+    return 0
+
+
+def block_with(message: str) -> int:
+    """Stop a slash command before it reaches the model, showing `message` instead."""
+    print(json.dumps({"decision": "block", "reason": f"session-archive {message}"}))
     return 0
 
 
@@ -112,6 +131,38 @@ def cmd_backfill(root: Path) -> int:
     return 1 if failed else 0
 
 
+def run_import(root: Path, args: str | list[str]) -> str:
+    """
+    Shared by the CLI and the zero-token hook. Returns the report text.
+
+    Examples of args: "", "--list", "75cb6e36", "--from /Volumes/backup/.claude"
+    """
+    parser = argparse.ArgumentParser(prog="/session-archive:import", add_help=False, exit_on_error=False)
+    parser.add_argument("session", nargs="?", help="session id or its first characters")
+    parser.add_argument("--list", action="store_true", help="only show what is missing")
+    parser.add_argument("--from", dest="source", help="archive this backup folder first")
+    try:
+        opts = parser.parse_args(shlex.split(args) if isinstance(args, str) else args)
+    except (argparse.ArgumentError, SystemExit, ValueError):
+        return "import: usage: /session-archive:import [session-id] [--list] [--from <folder>]"
+
+    prefix = ""
+    if opts.source:
+        found = sync.transcripts_in(Path(opts.source))
+        for session_id, transcript, claude_dir in found:
+            sync.sync_session(root, session_id, transcript, cwd=None, claude_dir=claude_dir)
+        prefix = f"archived {len(found)} sessions from {opts.source}\n"
+    results = restore.restore(root, claude_home(), opts.session, dry_run=opts.list)
+    if opts.session and not results:
+        return prefix + f"import: no archived session starts with {opts.session!r}"
+    return prefix + restore.format_report(results, list_only=opts.list)
+
+
+def cmd_import(root: Path, args: list[str]) -> int:
+    print(run_import(root, args))
+    return 0
+
+
 def cmd_index(root: Path) -> int:
     with file_lock(root / ".locks" / "index.lock"):
         count = rebuild_index(root)
@@ -129,7 +180,12 @@ def main(argv: list[str] | None = None) -> int:
     save.add_argument("--cwd")
     sub.add_parser("backfill", help="archive every transcript still on disk")
     sub.add_parser("index", help="rebuild README.md")
-    args = parser.parse_args(argv)
+    sub.add_parser("import", help="put archived sessions back into Claude Code "
+                                  "([session-id] [--list] [--from DIR])")
+    # import's own options (--list, --from) are parsed by run_import, shared with the hook.
+    args, extra = parser.parse_known_args(argv)
+    if extra and args.command != "import":
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
 
     root = archive_root(args.archive_dir)
     if args.command == "hook":
@@ -140,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_save(root, args.session, args.cwd)
         if args.command == "backfill":
             return cmd_backfill(root)
+        if args.command == "import":
+            return cmd_import(root, extra)
         return cmd_index(root)
     except Exception as exc:
         log_error(root, args.command)

@@ -19,6 +19,7 @@ and one for the index (so parallel sessions never interleave README writes).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,9 @@ from . import artifacts, index, mirror, render, transcript
 from .config import SNAPSHOT_TOOLS, claude_home
 from .fsutil import atomic_write_text, file_lock, read_json
 from .locate import project_name, repo_root, session_dir
+
+
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 @dataclass
@@ -76,8 +80,14 @@ def capture_tool(root: Path, payload: dict) -> dict | None:
 
 
 def sync_session(root: Path, session_id: str, transcript_path: Path,
-                 cwd: str | None = None, force: bool = False) -> SyncResult:
-    """Bring one session's archive folder fully up to date."""
+                 cwd: str | None = None, force: bool = False,
+                 claude_dir: Path | None = None) -> SyncResult:
+    """
+    Bring one session's archive folder fully up to date.
+
+    `claude_dir` is the Claude data dir the transcript came from (default: this
+    machine's); pass a backup's dir to archive sessions from that backup.
+    """
     ensure_root(root)
     with file_lock(_lock(root, session_id)):
         parsed = None
@@ -92,7 +102,7 @@ def sync_session(root: Path, session_id: str, transcript_path: Path,
 
         folder = session_dir(root, session_id, project, started)
         previous = read_json(folder / "meta.json")
-        changed = mirror.mirror_session(claude_home(), transcript_path, session_id, folder / "raw")
+        changed = mirror.mirror_session(claude_dir or claude_home(), transcript_path, session_id, folder / "raw")
         if not (changed or force or not (folder / "chat.md").exists()):
             total = previous.get("messages", 0)
             return SyncResult(folder, total, 0, False)
@@ -116,6 +126,21 @@ def find_transcript(session_id: str) -> Path | None:
     """Newest transcript file for a session id under Claude's projects folder."""
     matches = list((claude_home() / "projects").glob(f"*/{session_id}.jsonl"))
     return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
+
+
+def transcripts_in(source: Path) -> list[tuple[str, Path, Path]]:
+    """
+    (session_id, transcript, claude_dir) for every transcript under a folder laid
+    out like Claude's data dir: a backup of ~/.claude, another machine's copy, or
+    just its projects/ folder.
+
+    Example: /Volumes/backup/.claude -> [("abc...", .../projects/-Users-me-app/abc....jsonl, /Volumes/backup/.claude)]
+    """
+    found = []
+    for path in Path(source).expanduser().rglob("*.jsonl"):
+        if path.parent.parent.name == "projects" and _UUID.fullmatch(path.stem):
+            found.append((path.stem, path, path.parent.parent.parent))
+    return sorted(found, key=lambda item: item[1].stat().st_mtime)
 
 
 def all_transcripts() -> list[tuple[str, Path]]:

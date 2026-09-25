@@ -34,7 +34,7 @@ If Claude Code ever rewrites a file instead, it is copied whole and the previous
 Files larger than 25 MB are recorded in `versions.jsonl` but not copied.
 `Write` calls carry the full file content, so older sessions and missed hooks still get exact versions.
 
-Problems never block a turn: hook errors are appended to `<archive>/_logs/errors.log`, and `/session-archive:save` reports them.
+Problems never block a turn: hook errors are appended to `<archive>/_logs/errors.log`.
 
 ## Install (private repo)
 
@@ -45,10 +45,10 @@ claude plugin marketplace add singhAmandeep007/claude-session-archive
 claude plugin install session-archive@claude-session-archive
 ```
 
-Then archive everything Claude Code still has on disk:
+Then archive everything Claude Code still has on disk (once, from a terminal):
 
-```
-/session-archive:save all
+```bash
+python3 ~/.claude/plugins/cache/claude-session-archive/session-archive/*/scripts/archive.py backfill
 ```
 
 ## Use
@@ -56,9 +56,24 @@ Then archive everything Claude Code still has on disk:
 | Command | Does |
 | --- | --- |
 | (nothing) | Hooks archive every turn automatically |
-| `/session-archive:save` | Save this chat now and report how many messages were new |
-| `/session-archive:save all` | Archive every transcript still on disk |
-| `python3 scripts/archive.py index` | Rebuild `README.md` |
+| `/session-archive:import` | Put every archived session Claude Code no longer has back where it expects it |
+| `/session-archive:import <id>` | Restore one session (the first characters of its id are enough) |
+| `/session-archive:import --list` | Show which archived sessions are missing, without changing anything |
+| `/session-archive:import --from <folder>` | Archive and restore sessions from a backup or another machine's `.claude` folder |
+| `archive.py backfill` / `archive.py index` | Archive everything on disk / rebuild `README.md` (terminal) |
+
+## Importing sessions back into Claude Code
+
+`/session-archive:import` costs **zero tokens**.
+A `UserPromptExpansion` hook runs the import itself and blocks the command before it reaches the model; Claude Code shows the hook's report instead (0 turns, $0).
+If the hook ever can't run, the command falls back to asking Claude to run the same script.
+
+Restored files are byte-exact copies placed at the path Claude Code originally used (`~/.claude/projects/<folder>/<id>.jsonl`), together with subagent transcripts and file history, so `claude --resume <id>` continues the conversation with full context and rewind works.
+A live transcript is never overwritten: an older prefix is extended, and a copy that differs is left alone and reported as a conflict.
+Run `claude --resume <id>` from the session's folder, which the report prints.
+
+Limits: the Claude desktop app's sidebar lists only sessions from its own private registry, so restored sessions open from the CLI and VS Code, not the desktop sidebar.
+Only sessions that were archived (or are in a folder you pass to `--from`) can be restored; transcripts Claude Code deleted before you installed this plugin are gone unless a backup still has them.
 
 Change the folder with the plugin's **Archive folder** option (default `~/claude-archive`).
 `SESSION_ARCHIVE_DIR` overrides everything, which is useful for tests.
