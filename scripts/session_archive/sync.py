@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import artifacts, index, mirror, render, transcript
-from .config import SNAPSHOT_TOOLS, claude_home
+from . import __version__
+from .config import claude_home
 from .fsutil import atomic_write_text, file_lock, read_json
 from .locate import project_name, repo_root, session_dir
 
@@ -54,29 +55,29 @@ def ensure_root(root: Path) -> None:
 # Business logic
 # -----------------------------------------------------------------------------
 
-def capture_tool(root: Path, payload: dict) -> dict | None:
+def capture_tool(root: Path, payload: dict) -> list[dict]:
     """
-    Snapshot the file a PostToolUse payload refers to.
+    Snapshot the files a PostToolUse payload wrote or showed (see artifacts.captured_paths).
 
     Example payload: {"session_id": "...", "transcript_path": "...", "cwd": "/p",
                       "tool_name": "Edit", "tool_use_id": "toolu_1",
                       "tool_input": {"file_path": "/p/a.py", ...}}
     """
-    tool = payload.get("tool_name")
-    path = artifacts.tool_file_path(payload.get("tool_input") or {})
+    tool = payload.get("tool_name") or ""
+    paths = artifacts.captured_paths(tool, payload.get("tool_input") or {})
     session_id = payload.get("session_id")
-    if tool not in SNAPSHOT_TOOLS or not path or not session_id:
-        return None
+    if not paths or not session_id:
+        return []
 
     ensure_root(root)
     cwd = payload.get("cwd")
     with file_lock(_lock(root, session_id)):
         started = transcript.first_timestamp(Path(payload.get("transcript_path") or ""))
         folder = session_dir(root, session_id, project_name(cwd), started)
-        return artifacts.snapshot(
+        return [artifacts.snapshot(
             folder, file_path=path, tool=tool, tool_use_id=payload.get("tool_use_id") or "",
             ts=None, project_root=repo_root(cwd) if cwd else None, source="hook",
-        )
+        ) for path in paths]
 
 
 def sync_session(root: Path, session_id: str, transcript_path: Path,
@@ -103,7 +104,10 @@ def sync_session(root: Path, session_id: str, transcript_path: Path,
         folder = session_dir(root, session_id, project, started)
         previous = read_json(folder / "meta.json")
         changed = mirror.mirror_session(claude_dir or claude_home(), transcript_path, session_id, folder / "raw")
-        if not (changed or force or not (folder / "chat.md").exists()):
+        # Re-render when anything changed, or once after an archiver upgrade so old
+        # sessions gain what newer versions capture (e.g. screenshots in tool results).
+        stale = previous.get("archiver_version") != __version__
+        if not (changed or force or stale or not (folder / "chat.md").exists()):
             total = previous.get("messages", 0)
             return SyncResult(folder, total, 0, False)
 

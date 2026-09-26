@@ -23,8 +23,12 @@ from pathlib import Path
 
 DEFAULT_ARCHIVE_DIR = "~/claude-archive"
 
-# Tools whose output is a file worth versioning. The hook matcher mirrors this set.
-SNAPSHOT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "Artifact"})
+# Tools whose target file Claude wrote or published: every version is kept.
+WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "Artifact"})
+
+# Files shown in the chat are kept too: media Claude opened with Read (screenshots
+# from a device or browser usually live in /tmp and vanish) and files sent with SendUserFile.
+MEDIA_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf", ".mp4", ".mov", ".webm"})
 
 # Files larger than this are recorded in versions.jsonl but not copied.
 MAX_SNAPSHOT_BYTES = 25 * 1024 * 1024

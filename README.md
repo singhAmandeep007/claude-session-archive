@@ -10,11 +10,15 @@ This plugin copies everything into one folder per chat that you can read, search
 ~/claude-archive/
   README.md                                  index of every chat, grouped by project
   <project>/<YYYY-MM-DD_HHMM>_<id>/
-    chat.md        the conversation, with every file edit linked to the exact version it produced
+    chat.md        the conversation as you saw it: text, tool calls with their output
+                   (collapsed, first 2000 characters), and every image inline
     meta.json      title, folders, branch, app, model, dates, message and file counts
     raw/           byte-exact copy: transcript, subagents, tool results, pre-edit file history
-    artifacts/     every version of every file Claude wrote or edited, plus versions.jsonl
-    attachments/   images pasted into the chat
+    artifacts/     every version of every file Claude wrote or edited, plus media it opened
+                   (screenshots in /tmp) and files it sent to the chat, with versions.jsonl
+    attachments/   every image shown in the chat: pasted images, browser and device
+                   screenshots, images returned by any tool
+    widgets/       charts and diagrams Claude drew inline, as .svg or .html
 ```
 
 A chat that starts outside a repo is filed under `_no-repo` and moves into the repo's folder the first time it runs inside one.
@@ -25,6 +29,7 @@ Each session only ever has one folder, so nothing is duplicated.
 | Hook | Mode | Captures |
 | --- | --- | --- |
 | `PostToolUse` on Write, Edit, MultiEdit, NotebookEdit, Artifact | sync, ~40 ms | The file right after the edit, before anything can change it. Identical content is stored once. |
+| `PostToolUse` on Read (images, PDF, video only) and SendUserFile | async | The file shown in the chat, before `/tmp` cleanup removes it |
 | `Stop` | async | New transcript bytes (appended, not recopied), `chat.md`, `meta.json`, the index |
 | `SubagentStop`, `PreCompact` | async | Same as Stop |
 | `SessionEnd` | sync | Final flush before the process exits |
@@ -75,10 +80,10 @@ To choose or change the folder later, do either of these:
 Hooks load when a session starts, so sessions that were already open are not archived.
 After your first reply, check that `<archive folder>/README.md` lists the session.
 
-**Step 4 (optional). Archive the chats Claude Code still has on disk:**
+**Step 4 (optional). Archive the chats Claude Code still has on disk** by typing this in any session:
 
-```bash
-python3 ~/.claude/plugins/cache/claude-session-archive/session-archive/*/scripts/archive.py backfill
+```
+/session-archive:save all
 ```
 
 ## Use
@@ -86,16 +91,31 @@ python3 ~/.claude/plugins/cache/claude-session-archive/session-archive/*/scripts
 | Command | Does |
 | --- | --- |
 | (nothing) | Hooks archive every turn automatically |
+| `/session-archive:save` | Save this chat right now and report how many messages were new |
+| `/session-archive:save all` | Archive every chat Claude Code still has on disk |
 | `/session-archive:import` | Put every archived session Claude Code no longer has back where it expects it |
 | `/session-archive:import <id>` | Restore one session (the first characters of its id are enough) |
 | `/session-archive:import --list` | Show which archived sessions are missing, without changing anything |
 | `/session-archive:import --from <folder>` | Archive and restore sessions from a backup or another machine's `.claude` folder |
-| `archive.py backfill` / `archive.py index` | Archive everything on disk / rebuild `README.md` (terminal) |
+| `archive.py index` | Rebuild `README.md` (terminal) |
+
+Both slash commands cost **zero tokens** (see below).
+
+## Zero-token commands
+
+`/session-archive:save` and `/session-archive:import` never reach the model.
+A `UserPromptExpansion` hook runs the command itself and blocks it, and Claude Code shows the hook's report instead (0 turns, 0 tokens).
+Claude Code labels that report "blocked by hook"; that is expected and means the command ran.
+
+Example:
+
+```
+/session-archive:save
+session-archive saved 12 new messages (148 total) to ~/claude-archive/my-app/2026-09-25_1204_b2d6cc87
+```
 
 ## Importing sessions back into Claude Code
 
-`/session-archive:import` costs **zero tokens**.
-A `UserPromptExpansion` hook runs the import itself and blocks the command before it reaches the model; Claude Code shows the hook's report instead (0 turns, $0).
 If the hook ever can't run, the command falls back to asking Claude to run the same script.
 
 Restored files are byte-exact copies placed at the path Claude Code originally used (`~/.claude/projects/<folder>/<id>.jsonl`), together with subagent transcripts and file history, so `claude --resume <id>` continues the conversation with full context and rewind works.

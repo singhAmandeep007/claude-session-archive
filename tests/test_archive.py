@@ -431,5 +431,168 @@ class ImportTests(ArchiveTestCase):
         self.assertIn("usage: /session-archive:import", json.loads(result.stdout)["reason"])
 
 
+# -----------------------------------------------------------------------------
+# Manual save: /session-archive:save answered by the hook
+# -----------------------------------------------------------------------------
+
+class SaveCommandTests(ArchiveTestCase):
+    def save_command(self, args: str, sid: str, transcript: Path, cwd: Path) -> str:
+        result = self.env.hook({"hook_event_name": "UserPromptExpansion", "session_id": sid,
+                                "transcript_path": str(transcript), "cwd": str(cwd),
+                                "command_name": "session-archive:save", "command_args": args})
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["decision"], "block")
+        return decision["reason"]
+
+    def test_save_archives_the_live_session_and_reports_only_new_messages(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("first").assistant("one").flush()
+        self.assertIn("saved 2 new messages (2 total)", self.save_command("", SID_A, t.path, repo))
+        t.user("second").assistant("two").flush()
+        self.assertIn("saved 2 new messages (4 total)", self.save_command("", SID_A, t.path, repo))
+        self.assertEqual(len(self.env.session_folders()), 1)
+
+    def test_save_all_archives_every_transcript_on_disk(self):
+        app = git_init(self.env.work / "app")
+        web = git_init(self.env.work / "web")
+        a = self.env.transcript(SID_A, app)
+        a.user("a").assistant("a").flush()
+        self.env.transcript(SID_B, web).user("b").assistant("b").flush()
+        self.assertIn("backfilled 2 sessions", self.save_command("all", SID_A, a.path, app))
+        self.assertEqual(len(self.env.session_folders()), 2)
+
+    def test_save_as_the_first_message_says_there_is_nothing_yet(self):
+        repo = git_init(self.env.work / "app")
+        missing = self.env.claude / "projects" / "-app" / f"{SID_A}.jsonl"
+        self.assertIn("nothing to save yet", self.save_command("", SID_A, missing, repo))
+
+    def test_save_with_unknown_arguments_shows_usage(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("hi").assistant("hello").flush()
+        self.assertIn("usage: /session-archive:save [all]", self.save_command("everything", SID_A, t.path, repo))
+        self.assertEqual(self.env.session_folders(), [])
+
+
+# -----------------------------------------------------------------------------
+# Everything shown in the chat: screenshots, media, sent files, widgets
+# -----------------------------------------------------------------------------
+
+JPEG = b"\xff\xd8\xff\xe0" + bytes(range(48))
+PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(64))
+
+
+class ShownInChatTests(ArchiveTestCase):
+    def call(self, tool_id: str, name: str, **tool_input) -> dict:
+        return {"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}
+
+    def post_tool_use(self, sid, cwd, transcript, tool_id, name, tool_input):
+        result = self.env.hook({"hook_event_name": "PostToolUse", "session_id": sid,
+                                "transcript_path": str(transcript), "cwd": str(cwd),
+                                "tool_name": name, "tool_use_id": tool_id, "tool_input": tool_input})
+        self.assertEqual(result.returncode, 0)
+
+    def test_browser_screenshot_is_saved_and_shown_under_its_tool_call(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("check the page").assistant(tools=[self.call("toolu_s", "mcp__Claude_Browser__computer", action="screenshot")])
+        t.tool_result_image("toolu_s", "image/jpeg", base64.b64encode(JPEG).decode()).flush()
+        self.save(SID_A, repo)
+
+        folder = self.env.session_folders()[0]
+        shot, = (folder / "attachments").iterdir()
+        self.assertEqual(shot.read_bytes(), JPEG)
+        chat = (folder / "chat.md").read_text()
+        self.assertLess(chat.index("mcp__Claude_Browser__computer"), chat.index(f"attachments/{shot.name}"))
+
+    def test_device_screenshot_read_from_tmp_survives_tmp_cleanup(self):
+        repo = git_init(self.env.work / "app")
+        shot = self.env.tmp / "scratchpad" / "pixel-dark.png"
+        shot.parent.mkdir()
+        shot.write_bytes(PNG)
+        t = self.env.transcript(SID_A, repo)
+        t.user("how does it look?").assistant(tools=[self.call("toolu_r", "Read", file_path=str(shot))]).flush()
+        self.post_tool_use(SID_A, repo, t.path, "toolu_r", "Read", {"file_path": str(shot)})
+        t.tool_result_image("toolu_r", "image/png", base64.b64encode(PNG).decode()).flush()
+        shot.unlink()  # /tmp gets cleaned
+        self.save(SID_A, repo)
+
+        folder = self.env.session_folders()[0]
+        rec, = versions(folder)
+        self.assertEqual((folder / rec["snapshot"]).read_bytes(), PNG)
+        self.assertIn(rec["snapshot"], (folder / "chat.md").read_text())
+
+    def test_reading_source_code_is_not_copied(self):
+        repo = git_init(self.env.work / "app")
+        (repo / "main.py").write_text("print(1)")
+        t = self.env.transcript(SID_A, repo)
+        t.user("read it").assistant(tools=[self.call("toolu_c", "Read", file_path=str(repo / "main.py"))]).flush()
+        self.post_tool_use(SID_A, repo, t.path, "toolu_c", "Read", {"file_path": str(repo / "main.py")})
+        self.save(SID_A, repo)
+        self.assertFalse((self.env.session_folders()[0] / "artifacts" / "versions.jsonl").exists())
+
+    def test_every_file_sent_to_the_chat_is_kept_with_its_caption(self):
+        repo = git_init(self.env.work / "app")
+        png, pdf = self.env.tmp / "shot.png", self.env.tmp / "report.pdf"
+        png.write_bytes(PNG)
+        pdf.write_bytes(b"%PDF-1.4 test")
+        files = [str(png), str(pdf)]
+        t = self.env.transcript(SID_A, repo)
+        t.user("send me both").assistant(tools=[self.call("toolu_f", "SendUserFile", files=files, caption="v2 on the Pixel")]).flush()
+        self.post_tool_use(SID_A, repo, t.path, "toolu_f", "SendUserFile", {"files": files})
+        png.unlink()
+        pdf.unlink()
+        self.save(SID_A, repo)
+
+        folder = self.env.session_folders()[0]
+        recs = {Path(r["path"]).name: r for r in versions(folder)}
+        self.assertEqual((folder / recs["shot.png"]["snapshot"]).read_bytes(), PNG)
+        self.assertEqual((folder / recs["report.pdf"]["snapshot"]).read_bytes(), b"%PDF-1.4 test")
+        chat = (folder / "chat.md").read_text()
+        self.assertIn(f"![shot.png](<{recs['shot.png']['snapshot']}>)", chat)
+        self.assertIn('"v2 on the Pixel"', chat)
+
+    def test_inline_widget_is_saved_as_a_file(self):
+        repo = git_init(self.env.work / "app")
+        svg = '<svg viewBox="0 0 10 10"><circle r="4"/></svg>'
+        t = self.env.transcript(SID_A, repo)
+        t.user("draw it").assistant(tools=[self.call("toolu_w", "mcp__visualize__show_widget", widget_code=svg)]).flush()
+        self.save(SID_A, repo)
+
+        widget = self.env.session_folders()[0] / "widgets" / "toolu_w.svg"
+        self.assertEqual(widget.read_text(), svg)
+
+    def test_tool_output_is_shown_and_long_output_is_cut_with_a_pointer_to_raw(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("run it").assistant(tools=[self.call("toolu_a", "Bash", command="make"),
+                                          self.call("toolu_b", "Bash", command="cat big.log")])
+        t.tool_result("toolu_a", "build ok\n```\nnested fence\n```")
+        t.tool_result("toolu_b", "x" * 5000).flush()
+        self.save(SID_A, repo)
+
+        chat = (self.env.session_folders()[0] / "chat.md").read_text()
+        self.assertIn("nested fence", chat)
+        self.assertIn("  ````text", chat)  # fence longer than any backtick run in the output
+        self.assertIn("first 2000 of 5000 characters; the full output is in raw/", chat)
+        self.assertNotIn("x" * 2001, chat)
+
+    def test_sessions_archived_by_an_older_version_are_rerendered_once(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("check").assistant(tools=[self.call("toolu_s", "mcp__Claude_Browser__computer", action="screenshot")])
+        t.tool_result_image("toolu_s", "image/jpeg", base64.b64encode(JPEG).decode()).flush()
+        self.save(SID_A, repo)
+        folder = self.env.session_folders()[0]
+        shutil.rmtree(folder / "attachments")  # what an older version left behind
+        meta = json.loads((folder / "meta.json").read_text())
+        meta["archiver_version"] = "1.0.0"
+        (folder / "meta.json").write_text(json.dumps(meta))
+
+        self.save(SID_A, repo)  # transcript unchanged, but the archiver is newer
+        self.assertEqual(len(list((folder / "attachments").iterdir())), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

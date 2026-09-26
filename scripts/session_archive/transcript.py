@@ -9,7 +9,8 @@ A transcript is one JSON record per line. The records used here:
     {"type": "custom-title", "customTitle": "..."}
 
 Content blocks: text, image (base64 source), tool_use (id, name, input),
-tool_result (tool_use_id, content). Thinking blocks are skipped.
+tool_result (tool_use_id, content: text and images, e.g. browser or device
+screenshots). Thinking blocks are skipped.
 
 Example:
     session = parse(Path("~/.claude/projects/p/abc.jsonl").expanduser(), "abc")
@@ -61,6 +62,7 @@ class Session:
     cwds: list[str] = field(default_factory=list)
     turns: list[Turn] = field(default_factory=list)
     tool_results: dict[str, str] = field(default_factory=dict)
+    tool_images: dict[str, list[tuple[str, str]]] = field(default_factory=dict)  # tool_use_id -> images
 
     @property
     def display_title(self) -> str:
@@ -94,6 +96,20 @@ def _result_text(content) -> str:
     if isinstance(content, list):
         return "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
     return ""
+
+
+def _result_images(content) -> list[tuple[str, str]]:
+    """(media_type, base64) for every image inside a tool_result (screenshots, Read of an image)."""
+    if not isinstance(content, list):
+        return []
+    found = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "image":
+            continue
+        source = block.get("source") or {}
+        if source.get("type") == "base64" and source.get("data"):
+            found.append((source.get("media_type", "image/png"), source["data"]))
+    return found
 
 
 def first_timestamp(transcript: Path) -> datetime | None:
@@ -167,7 +183,11 @@ def _apply(session: Session, rec: dict) -> None:
         elif btype == "tool_use":
             turn.tools.append(ToolCall(block.get("id", ""), block.get("name", "tool"), block.get("input") or {}))
         elif btype == "tool_result":
-            session.tool_results[block.get("tool_use_id", "")] = _result_text(block.get("content"))
+            tool_id = block.get("tool_use_id", "")
+            session.tool_results[tool_id] = _result_text(block.get("content"))
+            images = _result_images(block.get("content"))
+            if images:
+                session.tool_images.setdefault(tool_id, []).extend(images)
 
     if kind == "user" and turn.texts and session.first_prompt is None and not turn.texts[0].startswith("<"):
         first_line = turn.texts[0].splitlines()[0].strip()  # "<command-...>" wrappers aren't titles

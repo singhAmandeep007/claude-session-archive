@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Session Archive command line, used by the plugin's hooks and its /save skill.
+Session Archive command line, used by the plugin's hooks and its slash commands.
 
 Commands:
     archive.py hook                        read a hook payload on stdin (all hook events)
@@ -12,9 +12,13 @@ Commands:
                                            (--from first archives a backup folder)
     archive.py index                       rebuild <archive>/README.md
 
-The /session-archive:import command costs zero tokens: a UserPromptExpansion
-hook runs `import` itself and blocks the command before it reaches the model,
-showing this script's report as the block reason.
+The /session-archive:save and /session-archive:import commands cost zero tokens:
+a UserPromptExpansion hook runs them itself and blocks the command before it
+reaches the model, showing this script's report as the block reason.
+
+    /session-archive:save          save this chat now
+    /session-archive:save all      archive every transcript still on disk (backfill)
+    /session-archive:import [...]  see `import` above
 
 Common option: --archive-dir DIR (default: see session_archive.config.archive_root).
 
@@ -45,6 +49,7 @@ from session_archive.index import rebuild_index  # noqa: E402
 
 FULL_SYNC_EVENTS = {"Stop", "SubagentStop", "PreCompact", "SessionEnd"}
 IMPORT_COMMAND = "session-archive:import"
+SAVE_COMMAND = "session-archive:save"
 
 
 # -----------------------------------------------------------------------------
@@ -83,8 +88,8 @@ def cmd_hook(root: Path) -> int:
         remember_plugin_option()
         payload = json.load(sys.stdin)
         event = payload.get("hook_event_name", "unknown")
-        if event == "UserPromptExpansion" and payload.get("command_name") == IMPORT_COMMAND:
-            return block_with(run_import(root, payload.get("command_args") or ""))
+        if event == "UserPromptExpansion" and payload.get("command_name") in (IMPORT_COMMAND, SAVE_COMMAND):
+            return block_with(run_slash_command(root, payload))
         if event == "PostToolUse":
             sync.capture_tool(root, payload)
         elif event in FULL_SYNC_EVENTS:
@@ -94,7 +99,7 @@ def cmd_hook(root: Path) -> int:
     except Exception as exc:  # never block a turn; keep the evidence instead
         log_error(root, f"hook {event}")
         if event == "UserPromptExpansion":
-            return block_with(f"import failed: {exc} (details in {root / '_logs' / 'errors.log'})")
+            return block_with(f"failed: {exc} (details in {root / '_logs' / 'errors.log'})")
     return 0
 
 
@@ -104,21 +109,25 @@ def block_with(message: str) -> int:
     return 0
 
 
-def cmd_save(root: Path, session_id: str, cwd: str | None) -> int:
-    """Archive one session and report what was new."""
-    transcript = sync.find_transcript(session_id)
+def save_report(root: Path, session_id: str, transcript: Path | None = None, cwd: str | None = None) -> str:
+    """
+    Archive one session now; return what was new.
+
+    Example: "saved 12 new messages (148 total) to ~/claude-archive/dotfiles/2026-09-23_1022_b9230413"
+    Raises LookupError when Claude Code has no transcript for the session.
+    """
+    transcript = transcript or sync.find_transcript(session_id)
     if transcript is None:
-        print(f"session-archive: no transcript found for session {session_id}", file=sys.stderr)
-        return 1
+        raise LookupError(f"no transcript found for session {session_id}")
     result = sync.sync_session(root, session_id, transcript, cwd)
-    print(f"saved {result.new_messages} new messages ({result.total_messages} total) to {result.folder}")
-    for line in recent_errors(root):
-        print(f"note: earlier hook error logged at {line} (see {root / '_logs' / 'errors.log'})")
-    return 0
+    lines = [f"saved {result.new_messages} new messages ({result.total_messages} total) to {result.folder}"]
+    lines += [f"note: earlier hook error logged at {line} (see {root / '_logs' / 'errors.log'})"
+              for line in recent_errors(root)]
+    return "\n".join(lines)
 
 
-def cmd_backfill(root: Path) -> int:
-    """Archive every transcript Claude Code still keeps, oldest first."""
+def backfill_report(root: Path) -> tuple[str, bool]:
+    """Archive every transcript Claude Code still keeps, oldest first; return (report, ok)."""
     done = failed = 0
     for session_id, transcript in sync.all_transcripts():
         try:
@@ -127,8 +136,45 @@ def cmd_backfill(root: Path) -> int:
         except Exception:
             log_error(root, f"backfill {session_id}")
             failed += 1
-    print(f"backfilled {done} sessions into {root}" + (f" ({failed} failed, see _logs/errors.log)" if failed else ""))
-    return 1 if failed else 0
+    report = f"backfilled {done} sessions into {root}" + (f" ({failed} failed, see _logs/errors.log)" if failed else "")
+    return report, not failed
+
+
+def run_slash_command(root: Path, payload: dict) -> str:
+    """
+    Answer /session-archive:save or /session-archive:import from a UserPromptExpansion payload.
+
+    The payload carries the live session, so `save` needs no arguments:
+        {"command_name": "session-archive:save", "command_args": "", "session_id": "...",
+         "transcript_path": "...", "cwd": "..."}
+    """
+    args = (payload.get("command_args") or "").strip()
+    if payload.get("command_name") == IMPORT_COMMAND:
+        return run_import(root, args)
+    if args == "all":
+        return backfill_report(root)[0]
+    if args:
+        return "save: usage: /session-archive:save [all]"
+    transcript = Path(payload.get("transcript_path") or "")
+    try:
+        return save_report(root, payload["session_id"], transcript if transcript.is_file() else None, payload.get("cwd"))
+    except LookupError:
+        return "save: nothing to save yet, this chat has no messages"
+
+
+def cmd_save(root: Path, session_id: str, cwd: str | None) -> int:
+    try:
+        print(save_report(root, session_id, cwd=cwd))
+    except LookupError as exc:
+        print(f"session-archive: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_backfill(root: Path) -> int:
+    report, ok = backfill_report(root)
+    print(report)
+    return 0 if ok else 1
 
 
 def run_import(root: Path, args: str | list[str]) -> str:

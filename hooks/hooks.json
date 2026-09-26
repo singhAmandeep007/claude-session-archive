@@ -2,7 +2,7 @@
   "hooks": {
     "UserPromptExpansion": [
       {
-        "matcher": "^session-archive:import$",
+        "matcher": "^session-archive:(save|import)$",
         "hooks": [
           {
             "type": "command",
@@ -20,6 +20,17 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/archive.py\" hook",
             "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "^(Read|SendUserFile)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/archive.py\" hook",
+            "async": true,
+            "timeout": 60
           }
         ]
       }

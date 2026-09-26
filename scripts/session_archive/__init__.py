@@ -16,4 +16,4 @@ Only the Python standard library is used, and Python 3.9+ is supported
 (macOS ships 3.9 as /usr/bin/python3).
 """
 
-__version__ = "1.1.1"
+__version__ = "1.3.0"

@@ -73,6 +73,12 @@ class Transcript:
     def tool_result(self, tool_id: str, text: str) -> "Transcript":
         return self._rec("user", [{"type": "tool_result", "tool_use_id": tool_id, "content": text}])
 
+    def tool_result_image(self, tool_id: str, media_type: str, data_b64: str) -> "Transcript":
+        """A tool result carrying an image, as screenshots and Read of an image come back."""
+        content = [{"type": "text", "text": "screenshot"},
+                   {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data_b64}}]
+        return self._rec("user", [{"type": "tool_result", "tool_use_id": tool_id, "content": content}])
+
     def flush(self) -> Path:
         """Append records not yet written (transcripts only ever grow)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)

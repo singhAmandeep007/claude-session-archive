@@ -14,6 +14,9 @@ A versions.jsonl record:
      "ts": "2026-09-24T22:30:44+05:30", "sha256": "ab12...", "size": 1234,
      "snapshot": "artifacts/src/app.py/2026-09-24_223044_ab12cd34.py", "source": "hook"}
 
+Captured files (see captured_paths): everything Claude wrote or published, plus
+media it opened with Read and files it sent to the chat with SendUserFile.
+
 Sources, best first:
     "hook"       PostToolUse fired right after the edit: the exact version.
     "transcript" Write calls carry the full content, so it is exact even without the hook.
@@ -31,7 +34,7 @@ import json
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
-from .config import MAX_SNAPSHOT_BYTES, SNAPSHOT_TOOLS
+from .config import MAX_SNAPSHOT_BYTES, MEDIA_EXTENSIONS, WRITE_TOOLS
 from .locate import safe_name
 from .transcript import Session
 
@@ -42,9 +45,25 @@ VERSIONS_FILE = "versions.jsonl"
 # Utilities
 # -----------------------------------------------------------------------------
 
-def tool_file_path(tool_input: dict) -> str | None:
-    """The file a tool call targets. Example: {"notebook_path": "/a.ipynb"} -> "/a.ipynb"."""
-    return tool_input.get("file_path") or tool_input.get("notebook_path")
+def captured_paths(tool: str, tool_input: dict) -> list[str]:
+    """
+    Files a tool call made or showed in the chat, which the archive keeps.
+
+    Examples:
+        Edit {"file_path": "/p/a.py"}                 -> ["/p/a.py"]
+        Read {"file_path": "/tmp/shot.png"}           -> ["/tmp/shot.png"]  (media only)
+        Read {"file_path": "/p/a.py"}                 -> []
+        SendUserFile {"files": ["/tmp/a.png", "b.pdf"]} -> ["/tmp/a.png", "b.pdf"]
+    """
+    if tool in WRITE_TOOLS:
+        path = tool_input.get("file_path") or tool_input.get("notebook_path")
+        return [path] if path else []
+    if tool == "Read":
+        path = tool_input.get("file_path") or ""
+        return [path] if Path(path).suffix.lower() in MEDIA_EXTENSIONS else []
+    if tool == "SendUserFile":
+        return [f for f in tool_input.get("files") or [] if isinstance(f, str) and f]
+    return []
 
 
 def display_path(file_path: str, project_root: Path | None) -> PurePosixPath:
@@ -98,7 +117,7 @@ def snapshot(session_dir: Path, *, file_path: str, tool: str, tool_use_id: str,
              ts: datetime | None, project_root: Path | None, source: str,
              content: bytes | None = None) -> dict:
     """
-    Record one version of `file_path` for a tool call (idempotent per tool_use_id).
+    Record one version of `file_path` for a tool call (idempotent per tool call and path).
 
     `content` is used when given (Write input from the transcript); otherwise the
     file is read from disk. Caller must hold the session lock.
@@ -110,7 +129,7 @@ def snapshot(session_dir: Path, *, file_path: str, tool: str, tool_use_id: str,
     """
     versions = load_versions(session_dir)
     for existing in versions:
-        if existing.get("tool_use_id") == tool_use_id:
+        if existing.get("tool_use_id") == tool_use_id and existing.get("path") == file_path:
             return existing
 
     when = ts or datetime.now().astimezone()
@@ -153,22 +172,22 @@ def reconcile(session_dir: Path, session: Session, project_root: Path | None) ->
 
     Returns the number of records added. Caller must hold the session lock.
     """
-    recorded = {v.get("tool_use_id") for v in load_versions(session_dir)}
+    recorded = {(v.get("tool_use_id"), v.get("path")) for v in load_versions(session_dir)}
     added = 0
     pending_edits: dict[str, tuple] = {}
 
     for turn in session.turns:
         for call in turn.tools:
-            path = tool_file_path(call.input)
-            if call.name not in SNAPSHOT_TOOLS or not path or call.id in recorded:
-                continue
-            if call.name == "Write" and isinstance(call.input.get("content"), str):
-                snapshot(session_dir, file_path=path, tool="Write", tool_use_id=call.id,
-                         ts=turn.ts, project_root=project_root, source="transcript",
-                         content=call.input["content"].encode("utf-8"))
-                added += 1
-            else:
-                pending_edits[path] = (call, turn.ts)  # keep the latest missed call per path
+            for path in captured_paths(call.name, call.input):
+                if (call.id, path) in recorded:
+                    continue
+                if call.name == "Write" and isinstance(call.input.get("content"), str):
+                    snapshot(session_dir, file_path=path, tool="Write", tool_use_id=call.id,
+                             ts=turn.ts, project_root=project_root, source="transcript",
+                             content=call.input["content"].encode("utf-8"))
+                    added += 1
+                else:
+                    pending_edits[path] = (call, turn.ts)  # keep the latest missed call per path
 
     # One "as of archive time" copy per path that has no version at all yet.
     have_snapshot = {v.get("path") for v in load_versions(session_dir) if v.get("snapshot")}
