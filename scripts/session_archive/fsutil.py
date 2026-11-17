@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
 import json
 import os
 import tempfile
@@ -23,6 +22,17 @@ from pathlib import Path
 from typing import Iterator
 
 from .config import LOCK_TIMEOUT_SECONDS
+
+try:  # POSIX (macOS, Linux)
+    import fcntl
+
+    def _try_lock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except ImportError:  # Windows has no fcntl; lock the file's first byte instead
+    import msvcrt
+
+    def _try_lock(fd: int) -> None:
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -71,10 +81,10 @@ def file_lock(path: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[Non
     try:
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _try_lock(fd)
                 break
             except OSError as exc:
-                if exc.errno not in (errno.EAGAIN, errno.EACCES) or time.monotonic() > deadline:
+                if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EDEADLK) or time.monotonic() > deadline:
                     raise TimeoutError(f"could not lock {path}") from exc
                 time.sleep(0.05)
         yield

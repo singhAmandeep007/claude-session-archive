@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePath
@@ -54,8 +55,10 @@ def restore_file(src: Path, dst: Path) -> str:
     """
     Copy src to dst without ever clobbering a different live file.
 
-    Returns "restored" (dst was missing), "present" (identical), "extended"
-    (dst was an older prefix and got the missing tail), or "conflict".
+    Returns "restored" (dst was missing), "present" (identical, or the live copy
+    already holds everything archived and more, as when a session kept going after
+    its last save), "extended" (dst was an older prefix and got the missing tail),
+    or "conflict" (the two differ).
     Example: restore_file(Path("raw/a.jsonl"), Path("~/.claude/projects/-p/a.jsonl"))
     """
     src_stat = src.stat()
@@ -71,6 +74,8 @@ def restore_file(src: Path, dst: Path) -> str:
             fin.seek(dst_size)
             shutil.copyfileobj(fin, fout)
         return "extended"
+    if dst_size > src_stat.st_size > 0 and _is_prefix(dst, src, src_stat.st_size):
+        return "present"  # live copy is ahead of the archive: nothing to restore
     return "conflict"
 
 
@@ -179,7 +184,7 @@ def format_report(results: list[RestoreResult], list_only: bool = False) -> str:
                  + (f", {count('missing-raw')} without a raw transcript" if count("missing-raw") else "")]
     for r in results:
         if r.status in ("restored", "extended") or (r.status == "conflict" and not list_only):
-            where = f"cd {r.cwd!r} && " if r.cwd else ""
+            where = f"cd {shlex.quote(r.cwd)} && " if r.cwd else ""
             note = " (kept the live copy, it differs)" if r.status == "conflict" else ""
             lines.append(f'- {r.session_id[:8]} "{r.title}"  {where}claude --resume {r.session_id}{note}')
     return "\n".join(lines)

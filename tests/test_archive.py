@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -691,3 +692,242 @@ class MachineTests(ArchiveTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# -----------------------------------------------------------------------------
+# Import edge cases a real user runs into
+# -----------------------------------------------------------------------------
+
+class ImportEdgeCaseTests(ImportTests):
+    def test_live_copy_that_kept_growing_after_the_last_save_is_not_a_conflict(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("first").assistant("one").flush()
+        self.save(SID_A, repo)
+        t.user("after the last save").assistant("two").flush()  # the session went on
+        before = t.path.read_bytes()
+
+        out = self.env.cli("import")
+
+        self.assertIn("0 restored, 0 extended, 1 already in Claude Code, 0 conflicts", out.stdout)
+        self.assertEqual(t.path.read_bytes(), before)
+
+    def test_unknown_session_id_says_so(self):
+        self.archived_then_deleted()
+        out = self.env.cli("import", "ffffffff")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("no archived session starts with 'ffffffff'", out.stdout)
+
+    def test_restores_even_when_the_project_folder_is_gone(self):
+        t, original = self.archived_then_deleted()
+        shutil.rmtree(self.env.work / "app")
+        out = self.env.cli("import")
+        self.assertIn("1 restored", out.stdout)
+        self.assertEqual(t.path.read_bytes(), original)
+
+    def test_restores_into_a_claude_folder_that_has_no_projects_yet(self):
+        t, original = self.archived_then_deleted()
+        shutil.rmtree(self.env.claude / "projects")
+        out = self.env.cli("import")
+        self.assertIn("1 restored", out.stdout)
+        self.assertEqual(t.path.read_bytes(), original)
+
+    def test_resume_hint_is_a_shell_safe_command_for_odd_folder_names(self):
+        t, _ = self.archived_then_deleted(name="my app's (v2)")
+        out = self.env.cli("import")
+        line = next(l for l in out.stdout.splitlines() if "--resume" in l)
+        hint = line.split('"  ', 1)[1]
+        parts = shlex.split(hint)  # a user can paste it as is
+        self.assertEqual(parts[0], "cd")
+        self.assertEqual(parts[1], str(self.env.work / "my app's (v2)"))
+        self.assertEqual(parts[-1], SID_A)
+
+    def test_archive_without_its_raw_transcript_is_reported_not_crashed(self):
+        self.archived_then_deleted()
+        folder = self.env.session_folders()[0]
+        (folder / "raw" / f"{SID_A}.jsonl").unlink()
+        out = self.env.cli("import")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("1 without a raw transcript", out.stdout)
+
+    def test_unreadable_meta_is_skipped_and_the_rest_still_import(self):
+        a, _ = self.archived_then_deleted(SID_A, "app")
+        b, original_b = self.archived_then_deleted(SID_B, "web")
+        broken = next(f for f in self.env.session_folders() if f.name.endswith(SID_A[:8]))
+        (broken / "meta.json").write_text("{ not json")
+        out = self.env.cli("import")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(b.path.read_bytes(), original_b)
+        self.assertFalse(a.path.exists())
+
+    def test_session_archived_on_another_computer_lands_under_this_claude_folder(self):
+        t, original = self.archived_then_deleted()
+        folder = self.env.session_folders()[0]
+        meta = json.loads((folder / "meta.json").read_text())
+        meta["source_transcript"] = f"/Users/someone-else/.claude/projects/{t.path.parent.name}/{SID_A}.jsonl"
+        (folder / "meta.json").write_text(json.dumps(meta))
+        self.env.cli("import")
+        self.assertEqual(t.path.read_bytes(), original)
+
+    def test_list_changes_nothing_on_disk(self):
+        t, _ = self.archived_then_deleted()
+        self.env.cli("import", "--list")
+        self.assertFalse(t.path.exists())
+        self.assertFalse((self.env.claude / "file-history" / SID_A).exists())
+
+
+# -----------------------------------------------------------------------------
+# Archiving never breaks, whatever the transcript or folder looks like
+# -----------------------------------------------------------------------------
+
+class RobustnessTests(ArchiveTestCase):
+    def test_half_written_last_line_is_kept_exactly_and_completed_later(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("hi").assistant("hello").flush()
+        record = json.dumps({"type": "user", "timestamp": "2026-11-17T10:00:00Z", "cwd": str(repo),
+                             "message": {"role": "user", "content": "next question"}})
+        with t.path.open("a", encoding="utf-8") as fh:
+            fh.write(record[:25])  # Claude Code is mid-write
+        self.save(SID_A, repo)
+        with t.path.open("a", encoding="utf-8") as fh:
+            fh.write(record[25:] + "\n")
+        self.save(SID_A, repo)
+
+        folder = self.env.session_folders()[0]
+        self.assertEqual(sha(folder / "raw" / f"{SID_A}.jsonl"), sha(t.path))
+        self.assertIn("next question", (folder / "chat.md").read_text())
+
+    def test_unicode_emoji_and_invalid_bytes_do_not_break_the_chat(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("नमस्ते 👋 ñ").assistant("こんにちは").flush()
+        with t.path.open("ab") as fh:
+            fh.write(b'{"type": "user", "message": "\xff\xfe broken"}\n')
+        self.save(SID_A, repo)
+        folder = self.env.session_folders()[0]
+        chat = (folder / "chat.md").read_text(encoding="utf-8")
+        self.assertIn("नमस्ते 👋 ñ", chat)
+        self.assertIn("こんにちは", chat)
+        self.assertEqual(sha(folder / "raw" / f"{SID_A}.jsonl"), sha(t.path))
+
+    def test_record_shapes_this_version_does_not_know_are_skipped(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("before").flush()
+        odd = [[1, 2], "just a string", {"type": "user", "timestamp": 12345, "message": {"content": {"x": 1}}},
+               {"type": "assistant", "message": {"content": ["plain string block", None, 7]}},
+               {"type": "user", "message": {"content": [{"type": "tool_result", "content": 42}]}}]
+        with t.path.open("a", encoding="utf-8") as fh:
+            fh.writelines(json.dumps(rec) + "\n" for rec in odd)
+        t.user("after").assistant("still fine").flush()
+        self.save(SID_A, repo)
+        chat = (self.env.session_folders()[0] / "chat.md").read_text()
+        self.assertIn("before", chat)
+        self.assertIn("still fine", chat)
+
+    def test_archive_folder_with_spaces_and_tilde(self):
+        repo = git_init(self.env.work / "app")
+        self.env.transcript(SID_A, repo).user("hi").assistant("hello").flush()
+        self.env.env["HOME"] = str(self.env.tmp)
+        self.env.env["SESSION_ARCHIVE_DIR"] = "~/My Drive/AI archive"
+        self.save(SID_A, repo)
+        self.assertTrue(list((self.env.tmp / "My Drive" / "AI archive").glob("*/*/chat.md")))
+
+    def test_stop_hook_for_a_transcript_that_does_not_exist_is_a_no_op(self):
+        result = self.env.hook({"hook_event_name": "Stop", "session_id": SID_A,
+                                "transcript_path": str(self.env.tmp / "gone.jsonl"), "cwd": str(self.env.work)})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.env.session_folders(), [])
+
+    def test_unusable_archive_folder_never_blocks_a_turn(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("hi").assistant("hello").flush()
+        blocker = self.env.tmp / "not-a-folder"
+        blocker.write_text("a file where the archive should be")
+        self.env.env["SESSION_ARCHIVE_DIR"] = str(blocker)
+        result = self.env.hook({"hook_event_name": "Stop", "session_id": SID_A,
+                                "transcript_path": str(t.path), "cwd": str(repo)})
+        self.assertEqual(result.returncode, 0)
+
+    def test_index_survives_another_session_with_broken_meta(self):
+        app = git_init(self.env.work / "app")
+        self.env.transcript(SID_A, app).user("a").assistant("a").flush()
+        self.save(SID_A, app)
+        (self.env.session_folders()[0] / "meta.json").write_text("garbage")
+        web = git_init(self.env.work / "web")
+        self.env.transcript(SID_B, web).user("b").assistant("b").flush()
+        self.save(SID_B, web)
+        self.assertIn("web/", (self.env.archive / "README.md").read_text())
+
+    def test_saving_the_same_session_twice_in_parallel_with_backfill_keeps_one_folder(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        for i in range(20):
+            t.user(f"q{i}").assistant(f"a{i}")
+        t.flush()
+        script = Path(__file__).parents[1] / "scripts" / "archive.py"
+        procs = [subprocess.Popen([sys.executable, str(script), *args], env=self.env.env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                 for args in (["backfill"], ["save", "--session", SID_A, "--cwd", str(repo)]) * 3]
+        for p in procs:
+            _, err = p.communicate(timeout=120)
+            self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(len(self.env.session_folders()), 1)
+
+
+# -----------------------------------------------------------------------------
+# `archive.py command`: what the mod runs for /session-archive:save and :import
+# -----------------------------------------------------------------------------
+
+class ModCommandTests(ArchiveTestCase):
+    def command(self, name: str, args: str = "", sid: str = SID_A, cwd: Path | None = None) -> str:
+        payload = {"command_name": f"session-archive:{name}", "command_args": args,
+                   "session_id": sid, "cwd": str(cwd or self.env.work)}
+        result = self.env.cli("command", stdin=json.dumps(payload))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_save_finds_the_live_transcript_by_session_id(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("first").assistant("one").flush()
+        self.assertIn("saved 2 new messages (2 total)", self.command("save", cwd=repo))
+        self.assertEqual(self.env.session_folders()[0].parent.name, "app")
+
+    def test_save_all_and_import_list(self):
+        app = git_init(self.env.work / "app")
+        self.env.transcript(SID_A, app).user("a").assistant("a").flush()
+        self.assertIn("backfilled 1 sessions", self.command("save", "all"))
+        self.assertIn("0 of 1 archived sessions are missing", self.command("import", "--list"))
+
+    def test_import_restores_a_deleted_session(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("keep me").assistant("ok").flush()
+        self.command("save", cwd=repo)
+        original = t.path.read_bytes()
+        t.path.unlink()
+        self.assertIn("1 restored", self.command("import"))
+        self.assertEqual(t.path.read_bytes(), original)
+
+    def test_save_before_the_first_message_says_nothing_to_save(self):
+        self.assertIn("nothing to save yet", self.command("save"))
+
+    def test_bad_arguments_and_bad_input_answer_instead_of_crashing(self):
+        self.assertIn("usage: /session-archive:save [all]", self.command("save", "everything"))
+        self.assertIn("usage: /session-archive:import", self.command("import", "--bogus"))
+        result = self.env.cli("command", stdin="not json")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("failed:", result.stdout)
+
+    def test_archive_dir_from_the_plugin_option_is_used(self):
+        repo = git_init(self.env.work / "app")
+        self.env.transcript(SID_A, repo).user("a").assistant("a").flush()
+        custom = self.env.tmp / "chosen folder"
+        del self.env.env["SESSION_ARCHIVE_DIR"]
+        payload = {"command_name": "session-archive:save", "command_args": "", "session_id": SID_A, "cwd": str(repo)}
+        result = self.env.cli("--archive-dir", str(custom), "command", stdin=json.dumps(payload))
+        self.assertIn(str(custom.resolve()), result.stdout)
+        self.assertTrue(list(custom.glob("*/*/chat.md")))

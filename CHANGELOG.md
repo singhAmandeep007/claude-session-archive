@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.0 (2026-11-17)
+
+- `/session-archive:save` and `/session-archive:import` are answered by a mod (`hooks/register.ts`) on Claude Code 2.1.287 and newer: the report shows as normal command output instead of "A hook blocked your prompt", still at zero tokens. Older versions keep the hook path.
+- The mod falls back to `python` when `python3` is missing; file locking works on Windows (no `fcntl` there).
+- Import: a live transcript that kept growing after its last save now counts as "already in Claude Code" instead of a conflict; the `cd ... && claude --resume` hint is shell-quoted for any folder name.
+- Archiving no longer stops on a transcript with invalid UTF-8 bytes or record shapes it doesn't know; it skips what it can't read and keeps the rest.
+- Tests: 81 behavior tests (import edge cases, damaged transcripts, odd paths, parallel saves, the mod's command path) plus 6 mod tests; CI runs them on Linux and macOS.
+- README rewritten for first-time users: requirements and supported systems, the two command output styles, troubleshooting.
+
 ## 1.5.0 (2026-11-16)
 
 - A backfill files each session where the live hooks would: under the first repo it ran in, and a deleted subfolder under the repo around it (before: the last folder, or the deleted folder's own name). Archiving into a second folder no longer names the same session differently.

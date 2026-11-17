@@ -6,7 +6,7 @@ argument-hint: "[all]"
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/archive.py" *)
 ---
 
-This command normally never reaches you: the plugin's UserPromptExpansion hook runs it and shows the result.
+This command normally never reaches you: the plugin's mod (or, on older Claude Code, its UserPromptExpansion hook) runs it and shows the result.
 If you are reading this, that hook did not run. Run exactly one command and reply with its output only.
 
 If the arguments are exactly `all`:

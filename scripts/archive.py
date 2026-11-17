@@ -11,10 +11,15 @@ Commands:
                                            put archived sessions back into Claude Code
                                            (--from first archives a backup folder)
     archive.py index                       rebuild <archive>/README.md
+    archive.py command                     answer a slash command from a JSON payload on stdin
+                                           (used by the plugin's mod, hooks/register.ts)
 
-The /session-archive:save and /session-archive:import commands cost zero tokens:
-a UserPromptExpansion hook runs them itself and blocks the command before it
-reaches the model, showing this script's report as the block reason.
+The /session-archive:save and /session-archive:import commands cost zero tokens.
+On Claude Code with mods (v2.1.287+), the plugin's mod answers them through
+`archive.py command` and the report shows as the command's output. On older
+versions a UserPromptExpansion hook runs them and blocks the command before it
+reaches the model, showing the report as the block reason ("A hook blocked your
+prompt": expected there, the command still ran).
 
     /session-archive:save          save this chat now
     /session-archive:save all      archive every transcript still on disk (backfill)
@@ -228,6 +233,21 @@ def cmd_import(root: Path, args: list[str]) -> int:
     return 0
 
 
+def cmd_command(root: Path) -> int:
+    """
+    Answer a slash command for the mod; print the report as plain text.
+
+    Example stdin: {"command_name": "session-archive:save", "command_args": "all",
+                    "session_id": "...", "cwd": "/p"}  ->  "backfilled 49 sessions into ..."
+    """
+    try:
+        print(run_slash_command(root, json.load(sys.stdin)))
+    except Exception as exc:
+        log_error(root, "command")
+        print(f"failed: {exc} (details in {root / '_logs' / 'errors.log'})")
+    return 0
+
+
 def cmd_index(root: Path) -> int:
     with file_lock(root / ".locks" / "index.lock"):
         count = rebuild_index(root)
@@ -245,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     save.add_argument("--cwd")
     sub.add_parser("backfill", help="archive every transcript still on disk")
     sub.add_parser("index", help="rebuild README.md")
+    sub.add_parser("command", help="answer a slash command from a JSON payload on stdin (the mod)")
     sub.add_parser("import", help="put archived sessions back into Claude Code "
                                   "([session-id] [--list] [--from DIR])")
     # import's own options (--list, --from) are parsed by run_import, shared with the hook.
@@ -263,6 +284,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_backfill(root)
         if args.command == "import":
             return cmd_import(root, extra)
+        if args.command == "command":
+            return cmd_command(root)
         return cmd_index(root)
     except Exception as exc:
         log_error(root, args.command)

@@ -94,7 +94,7 @@ def load_versions(session_dir: Path) -> list[dict]:
     if not path.is_file():
         return []
     records = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             records.append(json.loads(line))
         except ValueError:

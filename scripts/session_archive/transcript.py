@@ -122,11 +122,11 @@ def first_timestamp(transcript: Path) -> datetime | None:
     Example: first_timestamp(Path(".../abc.jsonl")) -> datetime(2026, 9, 25, 10, 33, ...)
     """
     try:
-        with transcript.open(encoding="utf-8") as fh:
+        with transcript.open(encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 try:
                     ts = local_time(json.loads(line).get("timestamp"))
-                except ValueError:
+                except (ValueError, AttributeError, TypeError):  # not a record, or an odd one
                     continue
                 if ts:
                     return ts
@@ -143,13 +143,17 @@ def first_timestamp(transcript: Path) -> datetime | None:
 def parse(transcript: Path, session_id: str) -> Session:
     """Parse a whole transcript into a Session (main thread only, no sidechains)."""
     session = Session(session_id=session_id)
-    with transcript.open(encoding="utf-8") as fh:
+    with transcript.open(encoding="utf-8", errors="replace") as fh:  # one bad byte must not stop archiving
         for line in fh:
             try:
                 rec = json.loads(line)
             except ValueError:
                 continue
-            _apply(session, rec)
+            if isinstance(rec, dict):
+                try:
+                    _apply(session, rec)
+                except (AttributeError, TypeError, ValueError):
+                    continue  # a record shape this version doesn't know: skip it, keep the rest
     return session
 
 
@@ -171,14 +175,17 @@ def _apply(session: Session, rec: dict) -> None:
     if cwd and cwd not in session.cwds:
         session.cwds.append(cwd)
 
-    message = rec.get("message") or {}
+    message = rec.get("message")
+    message = message if isinstance(message, dict) else {}
     if kind == "assistant":
         session.model = message.get("model") or session.model
 
     turn = Turn(role=kind, ts=ts)
     content = message.get("content")
     blocks = [{"type": "text", "text": content}] if isinstance(content, str) else (content or [])
-    for block in blocks:
+    for block in blocks if isinstance(blocks, list) else []:
+        if not isinstance(block, dict):
+            continue
         btype = block.get("type")
         if btype == "text":
             text = clean(block.get("text", ""))
