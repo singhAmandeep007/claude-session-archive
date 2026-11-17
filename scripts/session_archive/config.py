@@ -33,6 +33,12 @@ MEDIA_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", 
 # Files larger than this are recorded in versions.jsonl but not copied.
 MAX_SNAPSHOT_BYTES = 25 * 1024 * 1024
 
+# A Stop or SubagentStop sync is skipped when the session was saved less than this many
+# minutes ago: cloud-synced folders (Google Drive, iCloud) re-upload whole files, and a raw
+# transcript can be 100 MB. Session end, compaction, /session-archive:save and file
+# snapshots always run. Override with the plugin option or SESSION_ARCHIVE_MIN_SYNC_MINUTES.
+DEFAULT_MIN_SYNC_MINUTES = 10
+
 # Seconds to wait for another process holding a session or index lock.
 LOCK_TIMEOUT_SECONDS = 60
 
@@ -79,6 +85,52 @@ def remember_plugin_option() -> None:
     pointer = _pointer_file()
     pointer.parent.mkdir(parents=True, exist_ok=True)
     pointer.write_text(option.strip() + "\n", encoding="utf-8")
+
+
+def min_sync_minutes() -> float:
+    """
+    Minimum minutes between automatic after-reply syncs (0 = sync after every reply).
+
+    Example: SESSION_ARCHIVE_MIN_SYNC_MINUTES=0 -> 0.0
+    """
+    for raw in (os.environ.get("SESSION_ARCHIVE_MIN_SYNC_MINUTES"), os.environ.get("CLAUDE_PLUGIN_OPTION_MIN_SYNC_MINUTES")):
+        if _usable(raw):
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                pass
+    return float(DEFAULT_MIN_SYNC_MINUTES)
+
+
+def machine_name() -> str:
+    """
+    This computer's stable name: macOS LocalHostName, else the hostname.
+
+    Example: "Amandeeps-MacBook-M3-Pro"
+    """
+    import socket
+    import subprocess
+    try:
+        out = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    return out or socket.gethostname().split(".")[0]
+
+
+def claude_account() -> str | None:
+    """
+    The signed-in Claude account's email (never a token), or None.
+
+    Claude Code keeps it in .claude.json: inside $CLAUDE_CONFIG_DIR when that is set, else in the home folder.
+    """
+    import json
+    folder = os.environ.get("CLAUDE_CONFIG_DIR")
+    path = Path(os.path.expanduser(folder)) / ".claude.json" if folder else Path.home() / ".claude.json"
+    try:
+        account = json.loads(path.read_text(encoding="utf-8")).get("oauthAccount") or {}
+    except (OSError, ValueError):
+        return None
+    return account.get("emailAddress")
 
 
 def claude_home() -> Path:

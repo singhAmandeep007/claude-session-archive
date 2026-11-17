@@ -36,6 +36,7 @@ import argparse
 import json
 import shlex
 import sys
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -43,11 +44,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from session_archive import restore, sync  # noqa: E402
-from session_archive.config import archive_root, claude_home, remember_plugin_option  # noqa: E402
+from session_archive.config import archive_root, claude_home, min_sync_minutes, remember_plugin_option  # noqa: E402
 from session_archive.fsutil import file_lock  # noqa: E402
 from session_archive.index import rebuild_index  # noqa: E402
+from session_archive.locate import find_session_dir  # noqa: E402
 
 FULL_SYNC_EVENTS = {"Stop", "SubagentStop", "PreCompact", "SessionEnd"}
+THROTTLED_EVENTS = {"Stop", "SubagentStop"}  # after-reply syncs; see config.DEFAULT_MIN_SYNC_MINUTES
 IMPORT_COMMAND = "session-archive:import"
 SAVE_COMMAND = "session-archive:save"
 
@@ -66,6 +69,19 @@ def log_error(root: Path, context: str) -> None:
             fh.write(f"--- {stamp} {context}\n{traceback.format_exc()}\n")
     except OSError:
         pass
+
+
+def recently_saved(root: Path, session_id: str) -> bool:
+    """
+    True when this session's folder was written less than min_sync_minutes() ago.
+
+    meta.json is rewritten on every sync that found something new, so its age is the
+    time since the last real save. Example: saved 3 minutes ago, limit 10 -> True.
+    """
+    limit = min_sync_minutes()
+    folder = find_session_dir(root, session_id) if limit else None
+    meta = folder / "meta.json" if folder else None
+    return bool(meta and meta.exists() and time.time() - meta.stat().st_mtime < limit * 60)
 
 
 def recent_errors(root: Path, limit: int = 3) -> list[str]:
@@ -94,8 +110,11 @@ def cmd_hook(root: Path) -> int:
             sync.capture_tool(root, payload)
         elif event in FULL_SYNC_EVENTS:
             transcript = Path(payload.get("transcript_path") or "")
-            if transcript.is_file() and payload.get("session_id"):
-                sync.sync_session(root, payload["session_id"], transcript, payload.get("cwd"))
+            session_id = payload.get("session_id")
+            if transcript.is_file() and session_id:
+                if event in THROTTLED_EVENTS and recently_saved(root, session_id):
+                    return 0
+                sync.sync_session(root, session_id, transcript, payload.get("cwd"))
     except Exception as exc:  # never block a turn; keep the evidence instead
         log_error(root, f"hook {event}")
         if event == "UserPromptExpansion":

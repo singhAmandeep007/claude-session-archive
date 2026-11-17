@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from helpers import FakeClaude, edit_call, git_init, write_call
@@ -154,6 +155,37 @@ class FolderTests(ArchiveTestCase):
         result = self.env.cli("backfill")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.env.session_folders()[0].parent.name, "deleted-repo")
+
+    def test_backfill_files_deleted_subfolder_under_its_repo(self):
+        repo = git_init(self.env.work / "datamover")
+        t = self.env.transcript(SID_A, repo / "docs")  # docs/ was deleted later
+        t.user("write docs").assistant("ok").flush()
+        result = self.env.cli("backfill")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.env.session_folders()[0].parent.name, "datamover")
+
+    def test_backfill_files_session_under_first_repo_like_live_hooks(self):
+        first = git_init(self.env.work / "cadence")
+        later = git_init(self.env.work / "op-sqlite")
+        t = self.env.transcript(SID_A, first)
+        t.user("start").assistant("ok")
+        t.cwd = str(later)
+        t.user("moved on").assistant("ok").flush()
+        result = self.env.cli("backfill")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.env.session_folders()[0].parent.name, "cadence")
+
+    def test_session_without_timestamps_keeps_one_folder_name(self):
+        path = self.env.claude / "projects" / "-tmp-x" / f"{SID_A}.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"type": "custom-title", "customTitle": "empty"}) + "\n")
+        old = datetime(2026, 1, 2, 3, 4).timestamp()
+        os.utime(path, (old, old))  # on macOS this also moves the creation time back
+        info = path.stat()
+        created = datetime.fromtimestamp(getattr(info, "st_birthtime", info.st_mtime))
+        result = self.env.cli("backfill")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.env.session_folders()[0].name, f"{created:%Y-%m-%d_%H%M}_{SID_A[:8]}")
 
     def test_parallel_syncs_leave_one_consistent_folder(self):
         repo = git_init(self.env.work / "app")
@@ -593,6 +625,69 @@ class ShownInChatTests(ArchiveTestCase):
         self.save(SID_A, repo)  # transcript unchanged, but the archiver is newer
         self.assertEqual(len(list((folder / "attachments").iterdir())), 1)
 
+
+
+# -----------------------------------------------------------------------------
+# Throttling: after-reply saves at most every N minutes
+# -----------------------------------------------------------------------------
+
+class ThrottleTests(ArchiveTestCase):
+    def stop(self, event: str, t, repo) -> None:
+        result = self.env.hook({"hook_event_name": event, "session_id": SID_A,
+                                "transcript_path": str(t.path), "cwd": str(repo)})
+        self.assertEqual(result.returncode, 0)
+
+    def messages(self) -> int:
+        return json.loads((self.env.session_folders()[0] / "meta.json").read_text())["messages"]
+
+    def test_second_reply_within_the_window_is_not_saved_but_session_end_is(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("one").assistant("1").flush()
+        self.stop("Stop", t, repo)
+        t.user("two").assistant("2").flush()
+        self.stop("Stop", t, repo)
+        self.stop("SubagentStop", t, repo)
+        self.assertEqual(self.messages(), 2)
+        self.stop("SessionEnd", t, repo)
+        self.assertEqual(self.messages(), 4)
+
+    def test_zero_minutes_saves_after_every_reply(self):
+        self.env.env["SESSION_ARCHIVE_MIN_SYNC_MINUTES"] = "0"
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("one").assistant("1").flush()
+        self.stop("Stop", t, repo)
+        t.user("two").assistant("2").flush()
+        self.stop("Stop", t, repo)
+        self.assertEqual(self.messages(), 4)
+
+    def test_reply_after_the_window_is_saved(self):
+        repo = git_init(self.env.work / "app")
+        t = self.env.transcript(SID_A, repo)
+        t.user("one").assistant("1").flush()
+        self.stop("Stop", t, repo)
+        meta = self.env.session_folders()[0] / "meta.json"
+        old = meta.stat().st_mtime - 11 * 60
+        os.utime(meta, (old, old))
+        t.user("two").assistant("2").flush()
+        self.stop("Stop", t, repo)
+        self.assertEqual(self.messages(), 4)
+
+
+class MachineTests(ArchiveTestCase):
+    def test_chat_records_machine_and_signed_in_account(self):
+        (self.env.claude / ".claude.json").parent.mkdir(parents=True, exist_ok=True)
+        (self.env.claude / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "me@example.com"}}))
+        repo = git_init(self.env.work / "app")
+        self.env.transcript(SID_A, repo).user("hi").assistant("hello").flush()
+        self.save(SID_A, repo)
+
+        folder = self.env.session_folders()[0]
+        meta = json.loads((folder / "meta.json").read_text())
+        self.assertEqual(meta["account"], "me@example.com")
+        self.assertTrue(meta["machine"])
+        self.assertIn("me@example.com", (folder / "chat.md").read_text())
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,7 +31,7 @@ import re
 from pathlib import Path
 
 from .artifacts import captured_paths
-from .config import WRITE_TOOLS
+from .config import WRITE_TOOLS, claude_account, machine_name
 from .transcript import Session, ToolCall
 
 TOOL_INPUT_PREVIEW = 240
@@ -223,6 +223,7 @@ def render(session: Session, session_dir: Path, records: list[dict], project: st
         f"| Started | {started} |",
         f"| Last updated | {updated} |",
         f"| Branch / app / model | `{session.branch or 'n/a'}` / {session.entry or 'n/a'} / {session.model or 'n/a'} |",
+        f"| Machine / account | `{machine_name()}` / {claude_account() or 'n/a'} |",
         f"| Messages | {len(session.turns)} |",
         f"| Exact transcript | {link(raw_name, 'raw/' + raw_name)} |",
         "",

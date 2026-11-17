@@ -27,7 +27,7 @@ from . import artifacts, index, mirror, render, transcript
 from . import __version__
 from .config import claude_home
 from .fsutil import atomic_write_text, file_lock, read_json
-from .locate import project_name, repo_root, session_dir
+from .locate import backfill_project, project_name, repo_root, session_dir
 
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -95,8 +95,8 @@ def sync_session(root: Path, session_id: str, transcript_path: Path,
         if cwd is None:  # backfill: take the folder from the transcript itself
             parsed = transcript.parse(transcript_path, session_id)
             cwd = parsed.cwds[-1] if parsed.cwds else None
-            project = project_name(cwd, parsed.branch)
-            started = parsed.started
+            project = backfill_project(parsed.cwds, parsed.branch)
+            started = parsed.started or transcript.first_timestamp(transcript_path)
         else:
             project = project_name(cwd)
             started = transcript.first_timestamp(transcript_path)

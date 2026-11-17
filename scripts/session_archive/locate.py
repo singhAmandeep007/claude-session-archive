@@ -69,11 +69,33 @@ def project_name(cwd: str | None, git_branch_hint: str | None = None) -> str:
     """
     if not cwd:
         return NO_REPO
-    root = repo_root(cwd) if Path(cwd).is_dir() else None
+    path = Path(cwd)
+    if path.is_dir():
+        root = repo_root(cwd)
+        return safe_name(root.name) if root is not None else NO_REPO
+    # The folder is gone: a deleted subfolder or worktree still belongs to the
+    # repo around it, so look there before falling back to the folder's own name.
+    existing = next((p for p in path.parents if p.is_dir()), None)
+    root = repo_root(str(existing)) if existing is not None else None
     if root is not None:
         return safe_name(root.name)
-    if git_branch_hint and not Path(cwd).is_dir():
-        return safe_name(Path(cwd).name)
+    if git_branch_hint:
+        return safe_name(path.name)
+    return NO_REPO
+
+
+def backfill_project(cwds: list[str], git_branch_hint: str | None = None) -> str:
+    """
+    Project for a session archived from its transcript alone (backfill, import).
+
+    Follows the live rule: a session belongs to the first repo it ran in, so a
+    backfill files it where the hooks would have, even if it later moved repos.
+    Example: backfill_project(["/tmp/x", "/me/cadence", "/me/op-sqlite"]) -> "cadence"
+    """
+    for cwd in cwds:
+        project = project_name(cwd, git_branch_hint)
+        if project != NO_REPO:
+            return project
     return NO_REPO
 
 

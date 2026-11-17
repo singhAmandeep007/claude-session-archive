@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.0 (2026-11-16)
+
+- A backfill files each session where the live hooks would: under the first repo it ran in, and a deleted subfolder under the repo around it (before: the last folder, or the deleted folder's own name). Archiving into a second folder no longer names the same session differently.
+- A session with no timestamped messages gets its folder name from the transcript's creation time instead of the current time, so it keeps one name.
+- Each archived chat records the computer it ran on (macOS LocalHostName) and the signed-in Claude account email, in `meta.json` and the `chat.md` header. Point the Archive folder option at a per-machine folder to keep machines apart.
+
+## 1.4.0 (2026-11-16)
+
+- After-reply saves (Stop, SubagentStop) run at most every 10 minutes per session (option `min_sync_minutes`, 0 = every reply). Cloud-synced folders such as Google Drive re-upload whole files, and transcripts reach 100 MB. Session end, compaction, `/session-archive:save` and file snapshots still save immediately.
+
 ## 1.3.0 (2026-09-26)
 
 - Everything shown in the chat is archived: images returned by tools (browser and device screenshots, Read of an image, any MCP tool) go to `attachments/` and appear inline under the tool call in `chat.md`.

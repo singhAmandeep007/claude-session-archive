@@ -30,7 +30,7 @@ Each session only ever has one folder, so nothing is duplicated.
 | --- | --- | --- |
 | `PostToolUse` on Write, Edit, MultiEdit, NotebookEdit, Artifact | sync, ~40 ms | The file right after the edit, before anything can change it. Identical content is stored once. |
 | `PostToolUse` on Read (images, PDF, video only) and SendUserFile | async | The file shown in the chat, before `/tmp` cleanup removes it |
-| `Stop` | async | New transcript bytes (appended, not recopied), `chat.md`, `meta.json`, the index |
+| `Stop` | async, at most every 10 min (`min_sync_minutes`) | New transcript bytes (appended, not recopied), `chat.md`, `meta.json`, the index |
 | `SubagentStop`, `PreCompact` | async | Same as Stop |
 | `SessionEnd` | sync | Final flush before the process exits |
 
@@ -126,6 +126,7 @@ Limits: the Claude desktop app's sidebar lists only sessions from its own privat
 Only sessions that were archived (or are in a folder you pass to `--from`) can be restored; transcripts Claude Code deleted before you installed this plugin are gone unless a backup still has them.
 
 Change the folder with the plugin's **Archive folder** option (default `~/claude-archive`).
+Change how often replies are saved with **Minutes between automatic saves** (`min_sync_minutes`, default 10, 0 = every reply); a cloud-synced archive folder re-uploads whole files, so 10 keeps Google Drive or iCloud traffic low.
 `SESSION_ARCHIVE_DIR` overrides everything, which is useful for tests.
 
 ## Privacy

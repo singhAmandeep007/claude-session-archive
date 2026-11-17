@@ -113,7 +113,14 @@ def _result_images(content) -> list[tuple[str, str]]:
 
 
 def first_timestamp(transcript: Path) -> datetime | None:
-    """Start time from the first timestamped record, reading as little as possible."""
+    """
+    Start time from the first timestamped record, reading as little as possible.
+
+    A transcript with no timestamped record (an empty or metadata-only session)
+    falls back to the file's creation time, so its folder name stays the same on
+    every save instead of taking the current time. None only if the file is gone.
+    Example: first_timestamp(Path(".../abc.jsonl")) -> datetime(2026, 9, 25, 10, 33, ...)
+    """
     try:
         with transcript.open(encoding="utf-8") as fh:
             for line in fh:
@@ -123,9 +130,10 @@ def first_timestamp(transcript: Path) -> datetime | None:
                     continue
                 if ts:
                     return ts
+        info = transcript.stat()
+        return datetime.fromtimestamp(getattr(info, "st_birthtime", info.st_mtime)).astimezone()
     except OSError:
-        pass
-    return None
+        return None
 
 
 # -----------------------------------------------------------------------------

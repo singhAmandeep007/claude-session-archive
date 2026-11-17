@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import __version__
+from .config import claude_account, machine_name
 from .fsutil import atomic_write_text, read_json, write_json
 from .transcript import Session
 
@@ -32,6 +33,8 @@ def build_meta(session: Session, project: str, transcript: Path, records: list[d
         "branch": session.branch,
         "entry": session.entry,
         "model": session.model,
+        "machine": machine_name(),
+        "account": claude_account(),
         "started": iso(session.started),
         "updated": iso(session.updated),
         "messages": len(session.turns),

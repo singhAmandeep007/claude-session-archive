@@ -1,7 +1,7 @@
 {
   "name": "session-archive",
   "displayName": "Session Archive",
-  "version": "1.3.0",
+  "version": "1.5.0",
   "description": "Keeps a permanent, readable copy of every Claude Code session: the exact transcript, a Markdown chat, every file version Claude wrote, pasted images, and published artifact links. Runs from hooks, so it costs zero model tokens.",
   "author": {
     "name": "Amandeep Singh",
@@ -22,6 +22,14 @@
       "title": "Archive folder (where your chats are saved)",
       "description": "Folder where every chat is saved. Keep the default ~/claude-archive unless you want it elsewhere, for example ~/Documents/claude-archive. Each chat gets its own subfolder: <folder>/<project>/<date>_<id>/ containing chat.md (readable chat), raw/ (exact copy), and artifacts/ (every file version). Avoid synced or shared folders: chats can contain secrets.",
       "default": "~/claude-archive"
+    },
+    "min_sync_minutes": {
+      "type": "number",
+      "title": "Minutes between automatic saves",
+      "description": "After a reply, save the session at most this often. Session end, compaction, /session-archive:save and file snapshots always save immediately. Use 0 to save after every reply. Keeps cloud-synced archive folders (Google Drive, iCloud) from re-uploading large transcripts every turn.",
+      "default": 10,
+      "min": 0,
+      "max": 240
     }
   }
 }
