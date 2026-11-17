@@ -1,11 +1,21 @@
 name: tests
 
+# Runs on every push and every pull request. The final "ci" job is the one check to
+# require (Settings > Branches) because it fails when any job below fails.
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python:
+    name: python (${{ matrix.os }}, ${{ matrix.python }})
     strategy:
       fail-fast: false
       matrix:
@@ -20,3 +30,29 @@ jobs:
       - name: Git identity for test repos
         run: git config --global user.email ci@example.com && git config --global user.name ci
       - run: python -m unittest discover -s tests -v
+
+  mod:
+    name: mod (validate + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Pinned so a new Claude Code release cannot fail the build on its own.
+      - run: npm install --global @anthropic-ai/claude-code@2.1.325
+      - name: Validate the manifest, hooks and mod
+        run: claude plugin validate .
+      - name: Run the mod tests
+        run: claude plugin test .
+
+  ci:
+    name: ci
+    if: always()
+    needs: [python, mod]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any test job failed
+        run: |
+          echo "python: ${{ needs.python.result }}, mod: ${{ needs.mod.result }}"
+          test "${{ needs.python.result }}" = "success" && test "${{ needs.mod.result }}" = "success"
